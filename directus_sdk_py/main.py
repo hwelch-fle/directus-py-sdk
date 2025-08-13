@@ -1,7 +1,7 @@
 import sys
 
 import requests
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 import urllib3
 from urllib3.exceptions import InsecureRequestWarning
 from typing import Dict, List, Union, Optional, Any
@@ -28,7 +28,11 @@ class DirectusClient:
         if not self.verify:
             urllib3.disable_warnings(category=InsecureRequestWarning)
         
-        self.url = url
+        # Store path component of base url if provided
+        _url = urlparse(url)
+        self.url = f"{_url.scheme}://{_url.netloc}"
+        self.subpath = _url.path if _url.path != '/' else None
+        
         if token is not None:
             self.static_token = token
             self.temporary_token = None
