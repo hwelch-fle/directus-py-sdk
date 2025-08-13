@@ -140,7 +140,7 @@ class DirectusClient:
     
     def clean_url(self, domain: str, path: str) -> str:
         """
-        Clean the URL by removing any leading slash.
+        Clean the URL by removing any leading or trailing slashes.
 
         Args:
             path (str): The URL path.
@@ -148,9 +148,16 @@ class DirectusClient:
         Returns:
             str: The cleaned URL path.
         """
-        clean_path = urljoin(domain, path)
-        clean_path = clean_path.replace("//", "/") if not clean_path.startswith("http://") and not clean_path.startswith("https://") and not clean_path.startswith("//") else clean_path
-        return clean_path
+        
+        # Strip slashes
+        path = path.strip('/')
+        
+        # Add subpath
+        if self.subpath is not None:
+            path = f"{self.subpath}/{path}"
+        
+        # Join to domain
+        return urljoin(domain, path)
         
     
     def get(self, path, output_type: str = "json", **kwargs):
