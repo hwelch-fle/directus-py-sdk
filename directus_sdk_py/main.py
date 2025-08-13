@@ -31,7 +31,7 @@ class DirectusClient:
         # Store path component of base url if provided
         _url = urlparse(url)
         self.url = f"{_url.scheme}://{_url.netloc}"
-        self.subpath = _url.path if _url.path != '/' else None
+        self.subpath = _url.path.strip('/') if _url.path != '/' else None
         
         if token is not None:
             self.static_token = token
