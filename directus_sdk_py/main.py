@@ -1,12 +1,10 @@
-import sys
-
 import requests
 from requests import HTTPError
 from urllib.parse import urljoin, urlparse
 import urllib3
 from urllib3.exceptions import InsecureRequestWarning
 from typing import Dict, List, Union, Optional, Any
-import os, json
+import json
 from dataclasses import dataclass
 
 import sqlparse
