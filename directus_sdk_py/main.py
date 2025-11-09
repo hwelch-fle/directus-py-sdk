@@ -44,7 +44,9 @@ class DirectusClient:
             self.static_token = None
             self.temporary_token = None
             
-
+    @property
+    def token_header(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self.get_token()}"}
 
     def login(self, email: str = None, password: str = None) -> tuple:
         """
@@ -92,7 +94,7 @@ class DirectusClient:
             refresh_token = self.refresh_token
         requests.post(
             f"{self.url}/auth/logout",
-            headers={"Authorization": f"Bearer {self.get_token()}"},
+            headers=self.token_header,
             json={"refresh_token": refresh_token},
             verify=self.verify
         )
@@ -173,7 +175,7 @@ class DirectusClient:
         """
         data = requests.get(
             self.clean_url(self.url, path),
-            headers={"Authorization": f"Bearer {self.get_token()}"},
+            headers=self.token_header,
             verify=self.verify,
             **kwargs
         )
@@ -196,7 +198,7 @@ class DirectusClient:
         """
         response = requests.post(
             self.clean_url(self.url, path),
-            headers={"Authorization": f"Bearer {self.get_token()}"},
+            headers=self.token_header,
             verify=self.verify,
             **kwargs
         )
@@ -217,7 +219,7 @@ class DirectusClient:
         Returns:
             dict: The response data.
         """
-        headers = {"Authorization": f"Bearer {self.get_token()}"}
+        headers = self.token_header
         response = requests.request("SEARCH", self.clean_url(self.url, path), headers=headers, json=query, verify=self.verify,
                                     **kwargs)
        
@@ -237,7 +239,7 @@ class DirectusClient:
         """
         response = requests.delete(
             self.clean_url(self.url, path),
-            headers={"Authorization": f"Bearer {self.get_token()}"},
+            headers=self.token_header,
             verify=self.verify,
             **kwargs
         )
@@ -257,7 +259,7 @@ class DirectusClient:
         """
         response = requests.patch(
             self.clean_url(self.url, path),
-            headers={"Authorization": f"Bearer {self.get_token()}"},
+            headers=self.token_header,
             verify=self.verify,
             **kwargs
         )
@@ -351,7 +353,7 @@ class DirectusClient:
             str or bytes: The file content.
         """
         url = f"{self.url}/files/{file_id}"
-        headers = {"Authorization": f"Bearer {self.get_token()}"}
+        headers = self.token_header
         response = requests.get(url, headers=headers, verify=self.verify, **kwargs)
         if response.status_code != 200:
             raise HTTPError(response.text)
@@ -365,7 +367,7 @@ class DirectusClient:
             file_path (str): The path to save the file on your computer / server.
         """
         url = f"{self.url}/assets/{file_id}?download="
-        headers = {"Authorization": f"Bearer {self.get_token()}"}
+        headers = self.token_header
         response = requests.get(url, headers=headers)
     
         
@@ -405,7 +407,7 @@ class DirectusClient:
             display["transforms"] = json.dumps(transform)
 
         url = f"{self.url}/assets/{file_id}?download="
-        headers = {"Authorization": f"Bearer {self.get_token()}"}
+        headers = self.token_header
         response = requests.get(url, headers=headers, params=display, verify=self.verify)
         if response.status_code != 200:
             raise HTTPError(response.text)
@@ -474,7 +476,7 @@ class DirectusClient:
             dict: The uploaded file data.
         """
         url = f"{self.url}/files"
-        headers = {"Authorization": f"Bearer {self.get_token()}"}
+        headers = self.token_header
         with open(file_path, 'rb') as file:
             files = {'file': file}
     
