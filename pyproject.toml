@@ -1,0 +1,9 @@
+[project]
+name = "directus-py-sdk"
+version = "0.1.0"
+description = "Directus SDK implementation for Python"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "httpx>=0.28.1",
+]
