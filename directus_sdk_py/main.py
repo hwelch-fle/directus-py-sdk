@@ -179,7 +179,7 @@ class DirectusClient:
             verify=self.verify,
             **kwargs
         )
-            raise HTTPError(_json['errors'])
+            raise HTTPError(data.json()['errors'])
         if output_type == 'csv':
             return data.text
 
