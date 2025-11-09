@@ -1,6 +1,7 @@
 import sys
 
 import requests
+from requests import HTTPError
 from urllib.parse import urljoin, urlparse
 import urllib3
 from urllib3.exceptions import InsecureRequestWarning
@@ -178,8 +179,7 @@ class DirectusClient:
             verify=self.verify,
             **kwargs
         )
-        if 'errors' in data.text:
-            raise AssertionError(data.json()['errors'])
+            raise HTTPError(_json['errors'])
         if output_type == 'csv':
             return data.text
 
@@ -203,7 +203,7 @@ class DirectusClient:
             **kwargs
         )
         if response.status_code != 200:
-            raise AssertionError(response.text)
+            raise HTTPError(response.text)
 
         return response.json()
 
@@ -244,7 +244,7 @@ class DirectusClient:
             **kwargs
         )
         if response.status_code != 204:
-            raise AssertionError(response.text)
+            raise HTTPError(response.text)
 
     def patch(self, path, **kwargs):
         """
@@ -265,7 +265,7 @@ class DirectusClient:
         )
 
         if response.status_code not in [200, 204]:
-            raise AssertionError(response.text)
+            raise HTTPError(response.text)
 
         return response.json()
 
@@ -356,7 +356,7 @@ class DirectusClient:
         headers = {"Authorization": f"Bearer {self.get_token()}"}
         response = requests.get(url, headers=headers, verify=self.verify, **kwargs)
         if response.status_code != 200:
-            raise AssertionError(response.text)
+            raise HTTPError(response.text)
         return response.content
 
     def download_file(self, file_id: str, file_path: str) -> None:
@@ -372,7 +372,7 @@ class DirectusClient:
     
         
         if response.status_code != 200:
-            raise AssertionError(response.text)
+            raise HTTPError(response.text)
         with open(file_path, "wb") as file:
             file.write(response.content)
     
@@ -410,7 +410,7 @@ class DirectusClient:
         headers = {"Authorization": f"Bearer {self.get_token()}"}
         response = requests.get(url, headers=headers, params=display, verify=self.verify)
         if response.status_code != 200:
-            raise AssertionError(response.text)
+            raise HTTPError(response.text)
         with open(file_path, "wb") as file:
             file.write(response.content)
 
@@ -482,7 +482,7 @@ class DirectusClient:
     
             response = requests.post(url, headers=headers, files=files, verify=self.verify)
         if response.status_code != 200:
-            raise AssertionError(response.text)
+            raise HTTPError(response.text)
 
         r = response.json()['data']
         # Mettre à jour les métadonnées du fichier
@@ -664,7 +664,7 @@ class DirectusClient:
         pk_name = self.get_pk_field(collection_name)['field']
         item_ids = [data['id'] for data in self.get(f"/items/{collection_name}?fields={pk_name}", params={"limit": -1})]
         if not item_ids:
-            raise AssertionError("No items to delete!")
+            raise ValueError("No items to delete!")
 
         for i in range(0, len(item_ids), 100):
             self.delete(f"/items/{collection_name}", json=item_ids[i:i + 100])
@@ -758,7 +758,7 @@ class DirectusClient:
         assert set(relation.keys()) == {'collection', 'field', 'related_collection'}
         try:
             self.post(f"/relations", json=relation)
-        except AssertionError as e:
+        except HTTPError as e:
             if '"id" has to be unique' in str(e):
                 self.post_relation(relation)
             else:
