@@ -181,9 +181,7 @@ class DirectusClient:
             verify=self.verify,
             **kwargs
         )
-        if response.status_code != 200:
-            raise HTTPError(response.text)
-
+        response.raise_for_status()
         return response.json()
 
     def search(self, path: str, query: dict[str, str] | None, **kwargs: Any) -> dict[str, Any] | list[Any]:
@@ -223,8 +221,7 @@ class DirectusClient:
             verify=self.verify,
             **kwargs
         )
-        if response.status_code != 204:
-            raise HTTPError(response.text)
+        response.raise_for_status()
 
     def patch(self, path: str, **kwargs: Any):
         """
@@ -243,10 +240,7 @@ class DirectusClient:
             verify=self.verify,
             **kwargs
         )
-
-        if response.status_code not in [200, 204]:
-            raise HTTPError(response.text)
-
+        response.raise_for_status()
         return response.json()
 
     def me(self) -> dict[str, Any]:
@@ -335,8 +329,7 @@ class DirectusClient:
         url = f"{self.url}/files/{file_id}"
         headers = self.token_header
         response = requests.get(url, headers=headers, verify=self.verify, **kwargs)
-        if response.status_code != 200:
-            raise HTTPError(response.text)
+        response.raise_for_status()
         return response.content
 
     def download_file(self, file_id: str, file_path: str) -> None:
@@ -349,10 +342,7 @@ class DirectusClient:
         url = f"{self.url}/assets/{file_id}?download="
         headers = self.token_header
         response = requests.get(url, headers=headers)
-    
-        
-        if response.status_code != 200:
-            raise HTTPError(response.text)
+        response.raise_for_status()
         with open(file_path, "wb") as file:
             file.write(response.content)
     
@@ -395,8 +385,7 @@ class DirectusClient:
         url = f"{self.url}/assets/{file_id}?download="
         headers = self.token_header
         response = requests.get(url, headers=headers, params=display, verify=self.verify)
-        if response.status_code != 200:
-            raise HTTPError(response.text)
+        response.raise_for_status()
         with open(file_path, "wb") as file:
             file.write(response.content)
 
