@@ -1,18 +1,20 @@
+from __future__ import annotations
+
 import requests
 from requests import HTTPError
 from urllib.parse import urljoin, urlparse
 import urllib3
 from urllib3.exceptions import InsecureRequestWarning
-from typing import Dict, List, Union, Optional, Any
+from typing import Any, Literal, overload
 import json
-from dataclasses import dataclass
-
-import sqlparse
-from sqlparse.sql import Where, Comparison, Identifier, Token
-from sqlparse.tokens import Keyword
+from mimetypes import guess_type
 
 class DirectusClient:
-    def __init__(self, url: str, token: str = None, email: str = None, password: str = None, verify: bool = False):
+    def __init__(self, url: str, 
+                 token: str | None = None, 
+                 email: str | None = None, 
+                 password: str | None = None, 
+                 verify: bool = False):
         """
         Initialize the DirectusClient.
 
@@ -31,77 +33,59 @@ class DirectusClient:
         _url = urlparse(url)
         self.url = f"{_url.scheme}://{_url.netloc}"
         self.subpath = _url.path.strip('/') if _url.path != '/' else None
+
+        # Set defaults for instance properties
+        self.expires: str = ""
+
+        # Use provided token for auth
+        self.static_token = token or ""
+        self.temporary_token = ""
         
-        if token is not None:
-            self.static_token = token
-            self.temporary_token = None
-        elif email is not None and password is not None:
-            self.email = email
-            self.password = password
-            self.login(email, password)
-            self.static_token = None
-        else:
-            self.static_token = None
-            self.temporary_token = None
+        # If email and password are provided, get token from those
+        self.email = email or ""
+        self.password = password or ""
+        if email and password:
+            self._login()
             
     @property
     def token_header(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.get_token()}"}
 
-    def login(self, email: str = None, password: str = None) -> tuple:
+    @property
+    def email_auth(self) -> dict[str, str]:
+        return {"email": self.email, "password": self.password}
+
+    def _login(self) -> None:
+        """ Login with the /auth/login endpoint using provided email and password
         """
-        Login with the /auth/login endpoint.
-
-        Args:
-            email (str): The email for authentication (optional).
-            password (str): The password for authentication (optional).
-
-        Returns:
-            tuple: The access token and refresh token.
-        """
-        if email is None or password is None:
-            email = self.email
-            password = self.password
-        else:
-            self.email = email
-            self.password = password
-
         auth = requests.post(
             f"{self.url}/auth/login",
-            json={"email": email, "password": password},
+            json=self.email_auth,
             verify=self.verify
-        ).json()
-        
-        if 'errors' in auth:
-            return {"errors": auth['errors'][0]['message']}
+        )
+        auth.raise_for_status()
+        _json = auth.json()
+        if 'errors' in _json:
+            raise HTTPError({"errors": _json['errors']})
 
-        auth = auth['data']
-        
-        self.static_token = None
-        self.temporary_token = auth['access_token']
-        self.refresh_token = auth['refresh_token']
-        self.expires = auth['expires']
-        return auth
+        _data: dict[str, Any] = _json['data']
+        self.static_token = ""
+        self.temporary_token: str = _data['access_token']
+        self.refresh_token: str = _data['refresh_token']
+        self.expires: str = _data['expires']
     
-    def logout(self, refresh_token: str = None) -> None:
-        """
-        Logout using the /auth/logout endpoint.
-
-        Args:
-            refresh_token (str): The refresh token (optional).
-        """
-        if refresh_token is None:
-            refresh_token = self.refresh_token
+    def logout(self) -> None:
+        """Logout using the /auth/logout endpoint."""
         requests.post(
             f"{self.url}/auth/logout",
             headers=self.token_header,
-            json={"refresh_token": refresh_token},
+            json={"refresh_token": self.refresh_token},
             verify=self.verify
         )
-        self.temporary_token = None
-        self.refresh_token = None
+        self.temporary_token = ""
+        self.refresh_token = ""
 
-    def refresh(self, refresh_token: str = None) -> None:
+    def refresh(self, refresh_token: str | None = None) -> None:
         """
         Retrieve new temporary access token and refresh token.
 
@@ -112,16 +96,13 @@ class DirectusClient:
             f"{self.url}/auth/refresh",
             json={"refresh_token": refresh_token, 'mode': 'json'},
             verify=self.verify
-        ).json()
-        if "data" in auth:
-            auth = auth['data']
-            self.temporary_token = auth['access_token']
-            self.refresh_token = auth['refresh_token']
-            self.expires = auth['expires']
-        else:
-            raise Exception(auth)
-        
-        return auth
+        )
+        auth.raise_for_status()
+        _json = auth.json()
+        _data = _json['data']
+        self.temporary_token = _data['access_token']
+        self.refresh_token = _data['refresh_token']
+        self.expires = _data['expires']
 
     def get_token(self):
         """
@@ -130,14 +111,8 @@ class DirectusClient:
         Returns:
             str: The authentication token.
         """
-        if self.static_token is not None:
-            token = self.static_token
-        elif self.temporary_token is not None:
-            token = self.temporary_token
-        else:
-            token = ""
-        return token
-
+        # Resolve token static -> temporary -> empty
+        return self.static_token or self.temporary_token or ""
     
     def clean_url(self, domain: str, path: str) -> str:
         """
@@ -159,9 +134,14 @@ class DirectusClient:
         
         # Join to domain
         return urljoin(domain, path)
-        
     
-    def get(self, path, output_type: str = "json", **kwargs):
+    # No good way to overload this since **kwargs could technically change the type.
+    # Explicitly define output type for all internal calls
+    @overload
+    def get(self, path: str, output_type: Literal['csv']='csv', **kwargs: Any) -> str: ... # pyright: ignore[reportOverlappingOverload]
+    @overload
+    def get(self, path: str, output_type: Literal['json']='json', **kwargs: Any) -> dict[str, Any] | list[Any]: ...
+    def get(self, path: str, output_type: Literal['json', 'csv'] = 'json', **kwargs: Any) -> dict[str, Any] | list[Any] | str:
         """
         Perform a GET request to the specified path.
 
@@ -179,13 +159,12 @@ class DirectusClient:
             verify=self.verify,
             **kwargs
         )
-            raise HTTPError(data.json()['errors'])
+        data.raise_for_status()
         if output_type == 'csv':
             return data.text
-
         return data.json()['data']
 
-    def post(self, path, **kwargs):
+    def post(self, path: str, **kwargs: Any):
         """
         Perform a POST request to the specified path.
 
@@ -207,7 +186,7 @@ class DirectusClient:
 
         return response.json()
 
-    def search(self, path, query: Dict = None, **kwargs):
+    def search(self, path: str, query: dict[str, str] | None, **kwargs: Any) -> dict[str, Any] | list[Any]:
         """
         Perform a SEARCH request to the specified path.
 
@@ -220,16 +199,17 @@ class DirectusClient:
             dict: The response data.
         """
         headers = self.token_header
-        response = requests.request("SEARCH", self.clean_url(self.url, path), headers=headers, json=query, verify=self.verify,
-                                    **kwargs)
-       
-        
-        try:
-            return response.json()['data']
-        except Exception as e:
-            return {'error': f'No data found for this request : {e}'}
+        response = requests.request(
+            "SEARCH", 
+            self.clean_url(self.url, path), 
+            headers=headers, 
+            json=query, 
+            verify=self.verify,
+            **kwargs)
+        response.raise_for_status()
+        return response.json()['data']
 
-    def delete(self, path, **kwargs):
+    def delete(self, path: str, **kwargs: Any):
         """
         Perform a DELETE request to the specified path.
 
@@ -246,7 +226,7 @@ class DirectusClient:
         if response.status_code != 204:
             raise HTTPError(response.text)
 
-    def patch(self, path, **kwargs):
+    def patch(self, path: str, **kwargs: Any):
         """
         Perform a PATCH request to the specified path.
 
@@ -269,16 +249,16 @@ class DirectusClient:
 
         return response.json()
 
-    def me(self):
+    def me(self) -> dict[str, Any]:
         """
         Get the current user.
 
         Returns:
             dict: The user data.
         """
-        return self.get("/users/me")
+        return dict(self.get("/users/me", output_type='json'))
     
-    def get_users(self, query: Dict = None, **kwargs):
+    def get_users(self, query: dict[str, str] | None, **kwargs: Any):
         """
         Get users based on the provided query.
 
@@ -291,7 +271,7 @@ class DirectusClient:
         """
         return self.search("/users", query=query, **kwargs)
 
-    def create_user(self, user_data, **kwargs):
+    def create_user(self, user_data: dict[str, Any], **kwargs: Any):
         """
         Create a new user.
 
@@ -304,7 +284,7 @@ class DirectusClient:
         """
         return self.post("/users", json=user_data, **kwargs)
 
-    def update_user(self, user_id, user_data, **kwargs):
+    def update_user(self, user_id: int, user_data: dict[str, Any], **kwargs: Any):
         """
         Update a user.
 
@@ -318,7 +298,7 @@ class DirectusClient:
         """
         return self.patch(f"/users/{user_id}", json=user_data, **kwargs)
 
-    def delete_user(self, user_id, **kwargs):
+    def delete_user(self, user_id: int, **kwargs: Any):
         """
         Delete a user.
 
@@ -328,7 +308,7 @@ class DirectusClient:
         """
         self.delete(f"/users/{user_id}", **kwargs)
 
-    def get_files(self, query: Dict = None, **kwargs):
+    def get_files(self, query: dict[str, str] | None, **kwargs: Any):
         """
         Get files based on the provided query.
 
@@ -341,7 +321,7 @@ class DirectusClient:
         """
         return self.search("/files", query=query, **kwargs)
 
-    def retrieve_file(self, file_id: str, **kwargs) -> Union[str, bytes]:
+    def retrieve_file(self, file_id: str, **kwargs: Any) -> str | bytes:
         """
         Retrieve information about a file, not the way to download it
 
@@ -376,7 +356,9 @@ class DirectusClient:
         with open(file_path, "wb") as file:
             file.write(response.content)
     
-    def download_photo(self, file_id: str, file_path: str, display: dict = {}, transform: list = []) -> None:
+    def download_photo(self, file_id: str, file_path: str, 
+                       display: dict[str, Any] | None = None, 
+                       transform: list[Any] | None = None) -> None:
         """
         Download a file from Directus.
 
@@ -402,6 +384,10 @@ class DirectusClient:
                 auto — Will try to format it in webp or avif if the browser supports it, otherwise it will fallback to jpg.
 
         """
+        if display is None:
+            display = {}
+        if transform is None:
+            transform = []
 
         if len(transform) > 0:
             display["transforms"] = json.dumps(transform)
@@ -414,7 +400,9 @@ class DirectusClient:
         with open(file_path, "wb") as file:
             file.write(response.content)
 
-    def get_url_file(self, file_id: str, display: dict = {}, transform: list = []) -> Union[str, bytes]:
+    def get_url_file(self, file_id: str, 
+                     display: dict[str, Any] | None = None, 
+                     transform: list[Any] | None = None) -> str | bytes:
         """
         Retrieve a file.
 
@@ -425,6 +413,11 @@ class DirectusClient:
         Returns:
             str or bytes: The file content.
         """
+        if display is None:
+            display = {}
+        if transform is None:
+            transform = []
+
         url = f"{self.url}/assets/{file_id}"
 
         # If there are display parameters
@@ -439,32 +432,7 @@ class DirectusClient:
 
         return url
     
-    # Define the file type based on the file extension
-    # return : image/jpeg, image/png, application/pdf, etc...
-    def define_file_type(self, file_path: str) -> str:
-        """
-        Define the file type based on the file extension.
-        """
-        ext_file = file_path.split(".")[-1]
-        if ext_file in ["jpg", "jpg"]:
-            return "image/jpeg"
-        elif ext_file in ["png", "webp", "gif"]:
-            return f"image/{ext_file}"
-        elif ext_file == "pdf":
-            return "application/pdf"
-        elif ext_file in ["doc", "docx"]:
-            return "application/msword"
-        elif ext_file in ["xls", "xlsx"]:
-            return "application/vnd.ms-excel"
-        elif ext_file == "odt":
-            return "application/vnd.oasis.opendocument.text"
-        elif ext_file == "ods":
-            return "application/vnd.oasis.opendocument.spreadsheet"
-        else:
-            return "text/plain"
-         #jpg, png, pdf, etc...
-    
-    def upload_file(self, file_path: str, data: dict = {}) -> Dict:
+    def upload_file(self, file_path: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
         """
         Upload a file.
 
@@ -475,29 +443,29 @@ class DirectusClient:
         Returns:
             dict: The uploaded file data.
         """
+        if data is None:
+            data = {}
         url = f"{self.url}/files"
         headers = self.token_header
         with open(file_path, 'rb') as file:
             files = {'file': file}
-    
             response = requests.post(url, headers=headers, files=files, verify=self.verify)
-        if response.status_code != 200:
-            raise HTTPError(response.text)
-
-        r = response.json()['data']
+        response.raise_for_status()
+        
+        _data = response.json()['data']
         # Mettre à jour les métadonnées du fichier
-        data["type"] = self.define_file_type(file_path)
+        data["type"] = guess_type(file_path)[0] or 'application/octet-stream'
         if data and response.json()['data']:
             file_id = response.json()['data']['id']
             # Mettre à jour le type du fichier
             
             
-            r = self.patch(f"/files/{file_id}", json=data)
-            r = r['data']
+            _data = self.patch(f"/files/{file_id}", json=data)
+            _data = _data['data']
 
-        return r
+        return _data
 
-    def delete_file(self, file_id, **kwargs):
+    def delete_file(self, file_id: int, **kwargs: Any):
         """
         Delete a file.
 
@@ -507,7 +475,7 @@ class DirectusClient:
         """
         self.delete(f"/files/{file_id}", **kwargs)
 
-    def get_collection(self, collection_name, **kwargs):
+    def get_collection(self, collection_name: str, **kwargs: Any) -> dict[str, Any]:
         """
         Get a collection.
 
@@ -518,9 +486,11 @@ class DirectusClient:
         Returns:
             dict: The collection data.
         """
-        return self.get(f"/collections/{collection_name}", **kwargs)
+        return dict(self.get(f"/collections/{collection_name}", output_type='json', **kwargs))
 
-    def get_items(self, collection_name, query: Dict = None, **kwargs):
+    def get_items(self, collection_name: str, 
+                  query: dict[str, str] | None, 
+                  **kwargs: Any) -> dict[str, Any]:
         """
         Get items from a collection based on the provided query.
 
@@ -532,9 +502,14 @@ class DirectusClient:
         Returns:
             list: The list of items matching the query.
         """
-        return self.search(f"/items/{collection_name}", query=query, **kwargs)
+        return dict(self.search(f"/items/{collection_name}", 
+                           output_type='json',
+                           query=query, 
+                           **kwargs))
 
-    def get_item(self, collection_name, item_id, query: Dict = None, **kwargs):
+    def get_item(self, collection_name: str, item_id: int, 
+                 query: dict[str, str] | None, 
+                 **kwargs: Any) -> dict[str, Any]:
         """
         Get a single item from a collection based on the provided query.
 
@@ -547,9 +522,12 @@ class DirectusClient:
         Returns:
             dict: The item matching the query.
         """
-        return self.get(f"/items/{collection_name}/{item_id}", **kwargs)
+        return dict(self.get(f"/items/{collection_name}/{item_id}", 
+                        output_type='json', 
+                        query=query, 
+                        **kwargs))
 
-    def create_item(self, collection_name, item_data, **kwargs):
+    def create_item(self, collection_name: str, item_data: dict[str, Any], **kwargs: Any):
         """
         Create a new item in a collection.
 
@@ -563,7 +541,7 @@ class DirectusClient:
         """
         return self.post(f"/items/{collection_name}", json=item_data, **kwargs)
 
-    def update_item(self, collection_name, item_id, item_data, **kwargs):
+    def update_item(self, collection_name: str, item_id: int, item_data: dict[str, Any], **kwargs: Any):
         """
         Update an item in a collection.
 
@@ -578,7 +556,7 @@ class DirectusClient:
         """
         return self.patch(f"/items/{collection_name}/{item_id}", json=item_data, **kwargs)
 
-    def update_file(self, item_id, item_data, **kwargs):
+    def update_file(self, item_id: int, item_data: dict[str, Any], **kwargs: Any):
         """
         Update an item in a collection.
 
@@ -593,7 +571,7 @@ class DirectusClient:
         """
         return self.patch(f"/files/{item_id}", json=item_data)
     
-    def delete_item(self, collection_name, item_id, **kwargs):
+    def delete_item(self, collection_name: str, item_id: int, **kwargs: Any):
         """
         Delete an item from a collection.
 
@@ -604,7 +582,7 @@ class DirectusClient:
         """
         self.delete(f"/items/{collection_name}/{item_id}", **kwargs)
 
-    def bulk_insert(self, collection_name: str, items: list, interval: int = 100, verbose: bool = False) -> None:
+    def bulk_insert(self, collection_name: str, items: list[dict[str, Any]], interval: int = 100, verbose: bool = False) -> None:
         """
         Insert multiple items into a collection in bulk.
 
@@ -628,17 +606,23 @@ class DirectusClient:
             collection_name (str): The name of the collection to duplicate.
             duplicate_collection_name (str): The name of the duplicated collection.
         """
-        duplicate_collection = self.get(f"/collections/{collection_name}")
+        duplicate_collection = self.get(f"/collections/{collection_name}", output_type='json')
+        assert isinstance(duplicate_collection, dict) # Type narrow
         duplicate_collection['collection'] = duplicate_collection_name
         duplicate_collection['meta']['collection'] = duplicate_collection_name
         duplicate_collection['schema']['name'] = duplicate_collection_name
         self.post("/collections", json=duplicate_collection)
-
-        fields = [field for field in self.get_all_fields(collection_name) if not field['schema']['is_primary_key']]
-        for field in fields:
+        
+        for field in self.get_all_fields(collection_name):
+            if field['schema']['is_primary_key']:
+                continue
             self.post(f"/fields/{duplicate_collection_name}", json=field)
 
-        items = self.get(f"/items/{collection_name}", params={"limit": -1})
+        items: list[dict[str, Any]] = self.get( # type: ignore
+            f"/items/{collection_name}", 
+            output_type='json', 
+            params={"limit": -1}
+        )
         self.bulk_insert(duplicate_collection_name, items)
 
     def collection_exists(self, collection_name: str) -> bool:
@@ -651,8 +635,9 @@ class DirectusClient:
         Returns:
             bool: True if the collection exists, False otherwise.
         """
-        collection_schema = [col['collection'] for col in self.get('/collections')]
-        return collection_name in collection_schema
+        collections = self.get('/collections', output_type='json')
+        assert isinstance(collections, list) # Type narrow
+        return any(col['collection'] == collection_name for col in collections)
 
     def delete_all_items(self, collection_name: str) -> None:
         """
@@ -661,15 +646,19 @@ class DirectusClient:
         Args:
             collection_name (str): The collection name.
         """
-        pk_name = self.get_pk_field(collection_name)['field']
-        item_ids = [data['id'] for data in self.get(f"/items/{collection_name}?fields={pk_name}", params={"limit": -1})]
-        if not item_ids:
-            raise ValueError("No items to delete!")
-
+        pk_fied = self.get_pk_field(collection_name)
+        if pk_fied is None:
+            return
+        pk_name = pk_fied['name']
+        recs = self.get(f"/items/{collection_name}?fields={pk_name}", output_type='json', params={"limit": -1})
+        assert isinstance(recs, list) # Type narrow
+        item_ids = [data['id'] for data in recs]
         for i in range(0, len(item_ids), 100):
             self.delete(f"/items/{collection_name}", json=item_ids[i:i + 100])
 
-    def get_all_fields(self, collection_name: str, query: Dict = None, **kwargs) -> list:
+    def get_all_fields(self, collection_name: str, 
+                       query: dict[str, str] | None = None, 
+                       **kwargs: Any) -> list[dict[str, Any]]:
         """
         Get all fields of a collection based on the provided query.
 
@@ -682,13 +671,15 @@ class DirectusClient:
             list: The list of fields matching the query.
         """
         fields = self.search(f"/fields/{collection_name}", query=query, **kwargs)
+        assert isinstance(fields, list) # Type narrow
         for field in fields:
+            field: dict[str, Any]
             if field.get('meta') and field['meta'].get('id'):
                 field['meta'].pop('id')
 
         return fields
 
-    def get_pk_field(self, collection_name: str) -> dict:
+    def get_pk_field(self, collection_name: str) -> dict[str, Any] | None:
         """
         Get the primary key field of a collection.
 
@@ -698,9 +689,11 @@ class DirectusClient:
         Returns:
             dict: The primary key field.
         """
-        return next(field for field in self.get(f"/fields/{collection_name}") if field['schema']['is_primary_key'])
+        fields = self.get(f"/fields/{collection_name}", output_type='json')
+        assert isinstance(fields, list) # Type narrow
+        return ([field for field in fields if field['schema']['is_primary_key']] + [None]).pop()
 
-    def get_all_user_created_collection_names(self, query: Dict = None, **kwargs) -> list:
+    def get_all_user_created_collection_names(self, query: dict[str, str] | None, **kwargs: Any) -> list[Any]:
         """
         Get all user-created collection names based on the provided query.
 
@@ -712,9 +705,14 @@ class DirectusClient:
             list: The list of user-created collection names matching the query.
         """
         collections = self.search('/collections', query=query, **kwargs)
-        return [col['collection'] for col in collections if not col['collection'].startswith('directus')]
+        assert isinstance(collections, list)
+        return [
+            col['collection'] 
+            for col in collections 
+            if not col['collection'].startswith('directus')
+        ]
 
-    def get_all_fk_fields(self, collection_name: str, query: Dict = None, **kwargs) -> list:
+    def get_all_fk_fields(self, collection_name: str, query: dict[str, str] | None, **kwargs: Any) -> list[Any]:
         """
         Get all foreign key fields of a collection based on the provided query.
 
@@ -727,9 +725,10 @@ class DirectusClient:
             list: The list of foreign key fields matching the query.
         """
         fields = self.search(f"/fields/{collection_name}", query=query, **kwargs)
+        assert isinstance(fields, list)
         return [field for field in fields if field['schema'].get('foreign_key_table')]
 
-    def get_relations(self, collection_name: str, query: Dict = None, **kwargs) -> list:
+    def get_relations(self, collection_name: str, query: dict[str, str] | None, **kwargs: Any) -> list[Any]:
         """
         Get all relations of a collection based on the provided query.
 
@@ -742,13 +741,14 @@ class DirectusClient:
             list: The list of relations matching the query.
         """
         relations = self.search(f"/relations/{collection_name}", query=query, **kwargs)
+        assert isinstance(relations, list)
         return [{
             "collection": relation["collection"],
             "field": relation["field"],
             "related_collection": relation["related_collection"]
         } for relation in relations]
 
-    def post_relation(self, relation: dict) -> None:
+    def post_relation(self, relation: dict[str, Any]) -> None:
         """
         Create a new relation.
 
@@ -757,386 +757,17 @@ class DirectusClient:
         """
         assert set(relation.keys()) == {'collection', 'field', 'related_collection'}
         try:
-            self.post(f"/relations", json=relation)
+            self.post("/relations", json=relation)
         except HTTPError as e:
             if '"id" has to be unique' in str(e):
                 self.post_relation(relation)
             else:
                 raise
     
-    def search_query(self, query: str, exclude_worlds_len: int = 2, cut_words: bool = True, **kwargs):
+    def search_query(self, query: str, exclude_worlds_len: int = 2, cut_words: bool = True, **kwargs: Any) -> dict[str, Any]:
         q = []
         if cut_words:
             q = [word for word in query.split() if len(word) > exclude_worlds_len]
         else:
             q = [query]
-            
-        query = {
-            "query": {
-                "search": q
-            }
-        }
-        return query
-        
-        
-@dataclass
-class DOp:
-    EQUALS = "_eq"
-    NOT_EQUALS = "_neq"
-    LESS_THAN = "_lt"
-    LESS_THAN_EQUAL = "_lte" 
-    GREATER_THAN = "_gt"
-    GREATER_THAN_EQUAL = "_gte"
-    IN = "_in"
-    NOT_IN = "_nin"
-    NULL = "_null"
-    NOT_NULL = "_nnull"
-    CONTAINS = "_contains"
-    NOT_CONTAINS = "_ncontains"
-    STARTS_WITH = "_starts_with"
-    ENDS_WITH = "_ends_with"
-    BETWEEN = "_between"
-    NOT_BETWEEN = "_nbetween"
-    EMPTY = "_empty"
-    NOT_EMPTY = "_nempty"
-
-class DirectusQueryBuilder:
-    def __init__(self):
-        self.query = {"query": {}}
-        
-    def nested_condition(self, logic_op: str, conditions: List[Dict]) -> 'DirectusQueryBuilder':
-        """
-        Add nested logical conditions (_and/_or)
-        Allows for complex nested conditions
-        """
-        if "filter" not in self.query["query"]:
-            self.query["query"]["filter"] = {}
-            
-        # If we already have conditions, wrap everything in a new logical operator
-        if self.query["query"]["filter"]:
-            current_filter = self.query["query"]["filter"].copy()
-            self.query["query"]["filter"] = {
-                logic_op: [
-                    current_filter,
-                    *conditions
-                ]
-            }
-        else:
-            self.query["query"]["filter"][logic_op] = conditions
-            
-        return self
-    
-    def or_condition(self, conditions: List[Dict]) -> 'DirectusQueryBuilder':
-        """Add OR conditions"""
-        return self.nested_condition("_or", conditions)
-    
-    def and_condition(self, conditions: List[Dict]) -> 'DirectusQueryBuilder':
-        """Add AND conditions"""
-        return self.nested_condition("_and", conditions)
-        
-    def field(self, field_name: str, operator: str, value: Any) -> 'DirectusQueryBuilder':
-        """Add a field filter condition"""
-        condition = {field_name: {operator: value}}
-        return self.and_condition([condition])
-
-    def sort(self, *fields: str) -> 'DirectusQueryBuilder':
-        """
-        Add sort conditions. Use '-' prefix for descending order.
-        Example:
-            .sort('name', '-date_created') # Sort by name ASC, date_created DESC
-        """
-        if not fields:
-            return self
-            
-        self.query["query"]["sort"] = list(fields)
-        return self
-    
-    def limit(self, limit: int) -> 'DirectusQueryBuilder':
-        """
-        Set the maximum number of items to return
-        Use -1 for maximum allowed items
-        """
-        self.query["query"]["limit"] = limit
-        return self
-    
-    def offset(self, offset: int) -> 'DirectusQueryBuilder':
-        """Set the number of items to skip"""
-        self.query["query"]["offset"] = offset
-        return self
-        
-    def page(self, page: int) -> 'DirectusQueryBuilder':
-        """Set the page number (1-indexed)"""
-        self.query["query"]["page"] = page
-        return self
-    
-    def build(self) -> Dict:
-        """Build and return the final query"""
-        return self.query
-
-class SQLToDirectusConverter:
-    def __init__(self):
-        self.builder = DirectusQueryBuilder()
-
-    def _format_sql(self, sql: str) -> str:
-        """Format SQL query before parsing"""
-        # Add spaces around parentheses
-        sql = sql.replace("(", " ( ")
-        sql = sql.replace(")", " ) ")
-        # Remove multiple spaces
-        sql = " ".join(sql.split())
-        return sql
-
-    def _get_next_value_after_keyword(self, tokens: List[Token], keyword: str) -> Optional[str]:
-        """Helper to get the next value after a keyword"""
-        for i, token in enumerate(tokens):
-            if token.ttype is Keyword and token.value.upper() == keyword:
-                # Look for the next non-whitespace token
-                for next_token in tokens[i+1:]:
-                    if not next_token.is_whitespace:
-                        return str(next_token)
-        return None
-
-    def _get_order_by_fields(self, tokens: List[Token]) -> List[str]:
-        """
-        Extrait les champs ORDER BY de la requête SQL
-        Retourne une liste de champs avec '-' pour DESC
-        """
-        order_fields = []
-        in_order_by = False
-        
-        for token in tokens:
-            if token.ttype is Keyword and token.value.upper() == "ORDER BY":
-                in_order_by = True
-                continue
-                    
-            if in_order_by:
-                if token.ttype is Keyword and token.value.upper() in ("LIMIT", "OFFSET"):
-                    break
-                    
-                if not token.is_whitespace and token.value != ',':
-                    value = str(token).strip()
-                    if value.upper() == "ASC":
-                        continue
-                    elif value.upper() == "DESC":
-                        if order_fields:  # S'assurer qu'il y a un champ précédent
-                            order_fields[-1] = f"-{order_fields[-1]}"  # Ajouter le - au champ précédent
-                    else:
-                        order_fields.append(value)
-                    
-        return order_fields
-    
-    @staticmethod
-    def _get_operator_mapping(sql_operator: str) -> str:
-        """Map SQL operators to Directus operators"""
-        mapping = {
-            "=": DOp.EQUALS,
-            "!=": DOp.NOT_EQUALS,
-            "<": DOp.LESS_THAN,
-            "<=": DOp.LESS_THAN_EQUAL,
-            ">": DOp.GREATER_THAN,
-            ">=": DOp.GREATER_THAN_EQUAL,
-            "IN": DOp.IN,
-            "NOT IN": DOp.NOT_IN,
-            "IS NULL": DOp.NULL,
-            "IS NOT NULL": DOp.NOT_NULL,
-            "LIKE": DOp.CONTAINS,
-        }
-        return mapping.get(sql_operator.upper(), sql_operator)
-
-    def _parse_comparison(self, comparison: Comparison) -> Dict:
-        """Parse a SQL comparison into a Directus filter condition"""
-        left = str(comparison.left)
-        operator = None
-        right_value = None
-
-        # Parcourir les tokens pour trouver l'opérateur et la valeur
-        for token in comparison.tokens:
-            if token.is_whitespace:
-                continue
-            if token.ttype is sqlparse.tokens.Keyword:
-                operator = self._get_operator_mapping(token.value)
-            elif isinstance(token, sqlparse.sql.Parenthesis):
-                # Cas spécial pour IN
-                values = str(token).strip("()").split(",")
-                right_value = [v.strip(" '\"") for v in values]
-            elif token.ttype is sqlparse.tokens.Name.Mixed or token.ttype is sqlparse.tokens.String.Single:
-                if right_value is None:  # Ne pas écraser la valeur si déjà définie (cas IN)
-                    right_value = str(token).strip("'\"")
-
-        if operator is None:
-            # Cas où l'opérateur n'est pas un keyword (e.g., =, !=, etc.)
-            operator = self._get_operator_mapping(str(comparison.token_next(0)[1]))
-
-        return {left: {operator: right_value}}
-
-    def _parse_group(self, group_token) -> Dict:
-        """Parse a grouped condition token (conditions within parentheses) recursively"""
-        # Remove outer parentheses and parse as a separate SQL statement
-        group_sql = str(group_token).strip("()")
-        if not group_sql.strip():
-            return {}
-            
-        parsed_group = sqlparse.parse(group_sql)[0]
-        
-        conditions = []
-        current_operator = "_and"
-        
-        # Pour gérer les IN on doit regrouper les tokens
-        tokens = [token for token in parsed_group.tokens if not token.is_whitespace]
-        i = 0
-        while i < len(tokens):
-            token = tokens[i]
-            
-            if token.ttype is Keyword:
-                if token.value.upper() == "OR":
-                    current_operator = "_or"
-                elif token.value.upper() == "AND":
-                    current_operator = "_and"
-                i += 1
-                continue
-                
-            # Détecter si c'est un IN
-            if (i + 2) < len(tokens) and tokens[i+1].value.upper() == 'IN':
-                # Créer une comparaison artificielle avec les 3 tokens
-                comparison = Comparison([tokens[i], tokens[i+1], tokens[i+2]])
-                cond = self._parse_comparison(comparison)
-                if cond:
-                    conditions.append(cond)
-                i += 3  # On avance de 3 tokens
-                continue
-                
-            if isinstance(token, Comparison):
-                cond = self._parse_comparison(token)
-                if cond:  # Ne pas ajouter les dictionnaires vides
-                    conditions.append(cond)
-            elif str(token).strip().startswith("("):
-                # Parsing récursif pour les sous-groupes
-                sub_conditions = self._parse_group(token)
-                if sub_conditions:  # Ne pas ajouter les dictionnaires vides
-                    conditions.append(sub_conditions)
-            elif isinstance(token, sqlparse.sql.Parenthesis):
-                if str(token).strip():  # Vérifier que ce n'est pas vide
-                    sub_conditions = self._parse_group(token)
-                    if sub_conditions:  # Ne pas ajouter les dictionnaires vides
-                        conditions.append(sub_conditions)
-            else:
-                # Pour les tokens complexes, les redécouper
-                sub_conditions = self._parse_non_standard_token(token)
-                conditions.extend(sub_conditions)
-                
-            i += 1
-        
-        if not conditions:
-            return {}
-        if len(conditions) == 1:
-            return conditions[0]
-            
-        return {current_operator: conditions}
-
-    def _parse_non_standard_token(self, token) -> List[Dict]:
-        """Parse a non-standard token by re-parsing it as SQL"""
-        conditions = []
-        try:
-            sub_tokens = [t for t in sqlparse.parse(str(token))[0].tokens if not t.is_whitespace]
-            i = 0
-            while i < len(sub_tokens):
-                sub_token = sub_tokens[i]
-                
-                # Détecter si c'est un IN
-                if (i + 2) < len(sub_tokens) and sub_tokens[i+1].value.upper() == 'IN':
-                    # Créer une comparaison artificielle avec les 3 tokens
-                    comparison = Comparison([sub_tokens[i], sub_tokens[i+1], sub_tokens[i+2]])
-                    parsed_condition = self._parse_comparison(comparison)
-                    if parsed_condition:
-                        conditions.append(parsed_condition)
-                    i += 3  # On avance de 3 tokens
-                    continue
-                    
-                if isinstance(sub_token, Comparison):
-                    parsed_condition = self._parse_comparison(sub_token)
-                    if parsed_condition:
-                        conditions.append(parsed_condition)
-                i += 1
-        except Exception as e:
-            print(f"Error in _parse_non_standard_token: {e}")
-        return conditions
-
-    def _parse_where_conditions(self, where_clause: Where) -> List[Dict]:
-        """Parse WHERE clause conditions with support for groups"""
-        conditions = []
-        current_group = []
-        current_operator = "_and"
-        
-        for token in where_clause.tokens:
-            if token.is_whitespace:
-                continue
-                
-            if token.ttype is Keyword and token.value.upper() in ("AND", "OR"):
-                if token.value.upper() == "OR":
-                    current_operator = "_or"
-                continue
-            
-            if isinstance(token, Comparison):
-                cond = self._parse_comparison(token)
-                if cond:
-                    conditions.append(cond)
-            elif str(token).strip().startswith("("):
-                group_conditions = self._parse_group(token)
-                if group_conditions:
-                    conditions.append(group_conditions)
-            else:
-                # Essayer de parser comme un token complexe
-                sub_conditions = self._parse_non_standard_token(token)
-                conditions.extend(sub_conditions)
-        
-        if current_operator == "_or":
-            return [{"_or": conditions}]
-        return conditions
-
-    def convert(self, sql_query: str) -> Dict:
-        """Convert a SQL query to a Directus query"""
-        # Format SQL before parsing
-        sql_query = self._format_sql(sql_query)
-        
-        parsed = sqlparse.parse(sql_query)[0]
-        tokens = list(parsed.flatten())
-        
-        where_clause = None
-        limit_value = None
-        offset_value = None
-        
-        # Find WHERE clause
-        for token in parsed.tokens:
-            if isinstance(token, Where):
-                where_clause = token
-                break
-        
-        # Get LIMIT and OFFSET values
-        limit_str = self._get_next_value_after_keyword(tokens, "LIMIT")
-        offset_str = self._get_next_value_after_keyword(tokens, "OFFSET")
-        
-        if limit_str and limit_str.isdigit():
-            limit_value = int(limit_str)
-        if offset_str and offset_str.isdigit():
-            offset_value = int(offset_str)
-        
-        # Build the query using DirectusQueryBuilder
-        builder = DirectusQueryBuilder()
-        
-        # Add WHERE conditions if present
-        if where_clause:
-            conditions = self._parse_where_conditions(where_clause)
-            builder.and_condition(conditions)
-        
-        # Add ORDER BY if present
-        order_fields = self._get_order_by_fields(tokens)
-        if order_fields:
-            builder.sort(*order_fields)
-        
-        # Add limit and offset if present
-        if limit_value is not None:
-            builder.limit(limit_value)
-        if offset_value is not None:
-            builder.offset(offset_value)
-            
-        return builder.build()
+        return {"query": {"search": q}}
